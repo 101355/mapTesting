@@ -11,6 +11,7 @@
   "dependencies": {
     "leaflet": "^1.9.4",
     "leaflet-rotatedmarker": "^0.2.0",
+    "leaflet-routing-machine": "^3.2.12",
     "vue": "^3.5.17"
   },
   "devDependencies": {

@@ -1,10 +1,11 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, nextTick } from "vue";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import "leaflet-rotatedmarker";
+import "leaflet-routing-machine";
+import "leaflet-routing-machine/dist/leaflet-routing-machine.css";
 
-// Fix for missing Leaflet marker icons
+// Fix marker icons
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
@@ -12,568 +13,429 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
 
-const lat = ref(0);
-const lng = ref(0);
-const map = ref();
-const mapContainer = ref();
-const isTracking = ref(false);
-const isLoading = ref(true);
+const redIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41],
+  className: 'leaflet-marker-icon'
+});
+
+const greenIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41],
+  className: 'leaflet-marker-icon'
+});
+
+const map = ref(null);
+const mapContainer = ref(null);
+const userMarker = ref(null);
+const destinationMarker = ref(null);
+const routingControl = ref(null);
 const routeInstructions = ref([]);
+const travelMode = ref('driving');
+const currentDuration = ref(0);
 const totalDistance = ref(0);
-const totalDuration = ref(0);
-const currentSpeed = ref(0);
-const eta = ref('Calculating...');
-const routeMode = ref('fastest'); // 'fastest' or 'direct'
+const currentLocation = ref(null);
+const isLoading = ref(false);
+const waypoints = ref([]);
+const destination = ref(null);
 
-let userMarker = null;
-let watchId = null;
-let movementPolyline = null;
-let positionsHistory = [];
-let destinationMarker = null;
-let routeLine = null;
-let isFirstPosition = true;
-let lastPosition = null;
-let lastPositionTime = null;
-
-function updatePosition(position) {
-  if (!map.value) return;
-  
-  lat.value = position.coords.latitude;
-  lng.value = position.coords.longitude;
-  const currentPosition = [lat.value, lng.value];
-  
-  // Calculate current speed
-  if (lastPosition && lastPositionTime) {
-    const distance = map.value.distance(lastPosition, currentPosition);
-    const timeDiff = (Date.now() - lastPositionTime) / 1000;
-    if (timeDiff > 0) {
-      currentSpeed.value = (distance / timeDiff * 3.6).toFixed(1); // km/h
+onMounted(() => {
+  nextTick(() => {
+    if (!mapContainer.value) {
+      console.error("Map container not found");
+      return;
     }
-  }
-  
-  lastPosition = currentPosition;
-  lastPositionTime = Date.now();
-  positionsHistory.push(currentPosition);
-  
-  if (isFirstPosition) {
-    try {
-      map.value.setView(currentPosition, 15, { animate: false });
-      isFirstPosition = false;
+
+    // Initialize map with default view (New York coordinates)
+    map.value = L.map(mapContainer.value, {
+      zoomControl: true,
+      preferCanvas: true
+    }).setView([40.7128, -74.0060], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map.value);
+
+    // Handle map clicks to add destination
+    map.value.on('click', async (e) => {
+      if (!currentLocation.value) {
+        alert("Please wait for your location to load first");
+        return;
+      }
+      
+      destination.value = e.latlng;
+      
+      if (destinationMarker.value) {
+        map.value.removeLayer(destinationMarker.value);
+      }
+      
+      destinationMarker.value = L.marker(e.latlng, {
+        icon: redIcon,
+        zIndexOffset: 900
+      }).addTo(map.value)
+        .bindPopup("Destination")
+        .openPopup();
+      
+      waypoints.value = [
+        L.latLng(currentLocation.value.lat, currentLocation.value.lng),
+        e.latlng
+      ];
+      
+      isLoading.value = true;
+      try {
+        await updateRoute();
+      } catch (error) {
+        console.error("Routing error:", error);
+        alert("Failed to calculate route");
+      }
       isLoading.value = false;
-    } catch (e) {
-      console.warn("Map setView error:", e);
-    }
+    });
+
+    // Ensure markers stay correct after zoom
+    map.value.on('zoomend', () => {
+      if (userMarker.value) userMarker.value.update();
+      if (destinationMarker.value) destinationMarker.value.update();
+      map.value.invalidateSize();
+    });
+
+    locateUser();
+  });
+});
+
+function locateUser() {
+  if (!navigator.geolocation) {
+    alert("Geolocation is not supported by your browser");
+    return;
   }
 
-  // Update user marker
-  if (!userMarker) {
-    userMarker = L.marker(currentPosition, {
-      draggable: false,
-      icon: L.icon({
-        iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41]
-      })
-    }).addTo(map.value)
-      .bindPopup("Your current location");
-  } else {
-    userMarker.setLatLng(currentPosition);
-  }
+  navigator.geolocation.watchPosition(
+    (pos) => {
+      const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+      currentLocation.value = latlng;
 
-  // Update route if destination exists
-  if (destinationMarker) {
-    updateRoute();
-  }
+      if (!userMarker.value) {
+        userMarker.value = L.marker(latlng, { 
+          icon: greenIcon,
+          zIndexOffset: 1000
+        }).addTo(map.value)
+          .bindPopup("Your location")
+          .openPopup();
+        map.value.setView(latlng, 15);
+      } else {
+        userMarker.value.setLatLng(latlng);
+      }
 
-  // Update movement path
-  if (movementPolyline) {
-    try {
-      map.value.removeLayer(movementPolyline);
-    } catch (e) {
-      console.warn("Polyline removal error:", e);
-    }
-  }
-  movementPolyline = L.polyline(positionsHistory, {color: 'blue'}).addTo(map.value);
+      if (destination.value) {
+        waypoints.value = [latlng, destination.value];
+        updateRoute();
+      }
+    },
+    (err) => {
+      console.error("Geolocation error:", err);
+      alert("Error getting your location: " + err.message);
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
 }
 
 async function updateRoute() {
-  if (!map.value || !userMarker || !destinationMarker) return;
-  
-  const start = userMarker.getLatLng();
-  const end = destinationMarker.getLatLng();
-  
-  // Clear previous route
-  if (routeLine) {
-    try {
-      map.value.removeLayer(routeLine);
-    } catch (e) {
-      console.warn("Route removal error:", e);
-    }
-  }
-  
-  if (routeMode.value === 'direct') {
-    // Show direct beeline
-    routeLine = L.polyline([start, end], {
-      color: '#93c5fd',
-      weight: 3,
-      dashArray: '5, 5'
-    }).addTo(map.value);
-    
-    const distance = map.value.distance(start, end);
-    totalDistance.value = (distance / 1000).toFixed(2);
-    totalDuration.value = 'N/A';
-    eta.value = 'N/A';
-    
-    routeInstructions.value = [{
-      instruction: "Direct path to destination",
-      distance: totalDistance.value + ' km',
-      duration: 'N/A',
-      type: 'direct'
-    }];
-    
-    return;
-  }
-  
-  try {
-    // Show temporary beeline while loading
-    const tempLine = L.polyline([start, end], {
-      color: '#93c5fd',
-      weight: 3,
-      dashArray: '5, 5'
-    }).addTo(map.value);
-    
-    // Get route from OSRM
-    const response = await fetch(
-      `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson&steps=true`
-    );
-    const data = await response.json();
-    
-    // Remove temporary line
-    try {
-      map.value.removeLayer(tempLine);
-    } catch (e) {
-      console.warn("Temp line removal error:", e);
-    }
-    
-    if (data.routes?.[0]) {
-      const route = data.routes[0];
-      totalDistance.value = (route.distance / 1000).toFixed(2);
-      totalDuration.value = (route.duration / 60).toFixed(2);
-      
-      // Calculate ETA
-      if (currentSpeed.value > 0) {
-        const speedKmh = parseFloat(currentSpeed.value);
-        const distanceKm = parseFloat(totalDistance.value);
-        const estimatedHours = distanceKm / speedKmh;
-        const hours = Math.floor(estimatedHours);
-        const minutes = Math.round((estimatedHours - hours) * 60);
-        eta.value = `${hours > 0 ? hours + 'h ' : ''}${minutes}m`;
-      } else {
-        eta.value = `${totalDuration.value} min (estimate)`;
-      }
-      
-      // Process instructions
-      routeInstructions.value = (route.legs[0]?.steps || []).map(step => ({
-        instruction: cleanInstruction(step.maneuver?.instruction),
-        distance: (step.distance / 1000).toFixed(2) + ' km',
-        duration: (step.duration / 60).toFixed(2) + ' min',
-        type: step.maneuver?.type || 'turn'
-      }));
-      
-      // Draw route
-      routeLine = L.geoJSON(route.geometry, {
-        style: {
-          color: '#3b82f6',
-          weight: 5,
-          opacity: 0.7
-        }
-      }).addTo(map.value);
-      
-      // Fit bounds safely
-      try {
-        const bounds = L.latLngBounds([start, end]);
-        map.value.fitBounds(bounds, { 
-          padding: [50, 50],
-          animate: false 
-        });
-      } catch (e) {
-        console.warn("FitBounds error:", e);
-        map.value.setView(start, 15, { animate: false });
-      }
-    }
-  } catch (error) {
-    console.error("Routing error:", error);
-    // Fallback to direct line
-    routeLine = L.polyline([start, end], {
-      color: '#93c5fd',
-      weight: 3,
-      dashArray: '5, 5'
-    }).addTo(map.value);
-    
-    routeInstructions.value = [{
-      instruction: "Could not load detailed directions - showing direct path",
-      distance: map.value.distance(start, end).toFixed(0) + ' m',
-      duration: 'N/A',
-      type: 'alert'
-    }];
-  }
-}
+  if (waypoints.value.length < 2) return;
 
-function cleanInstruction(text) {
-  if (!text) return "Continue";
-  try {
-    return text.replace(/<\/?[^>]+(>|$)/g, "");
-  } catch {
-    return text;
+  if (routingControl.value) {
+    map.value.removeControl(routingControl.value);
+    routingControl.value = null;
   }
-}
 
-function handleMapClick(e) {
-  if (!isTracking.value || !map.value) return;
-  
-  // Clear previous destination
-  if (destinationMarker) {
-    try {
-      map.value.removeLayer(destinationMarker);
-    } catch (e) {
-      console.warn("Marker removal error:", e);
-    }
-  }
-  
-  if (routeLine) {
-    try {
-      map.value.removeLayer(routeLine);
-    } catch (e) {
-      console.warn("Route removal error:", e);
-    }
-    routeLine = null;
-  }
-  
-  routeInstructions.value = [];
-  totalDistance.value = 0;
-  totalDuration.value = 0;
-  eta.value = 'Calculating...';
-  
-  // Create new destination
-  destinationMarker = L.marker(e.latlng, {
-    draggable: true,
-    icon: L.icon({
-      iconUrl: 'https://cdn0.iconfinder.com/data/icons/small-n-flat/24/678111-map-marker-512.png',
-      iconSize: [32, 32]
-    })
-  }).addTo(map.value)
-    .bindPopup("Destination")
-    .openPopup();
-  
-  // Update route immediately
-  updateRoute();
-  
-  // Update on drag with debounce
-  let dragTimeout;
-  destinationMarker.on('drag', () => {
-    clearTimeout(dragTimeout);
-    dragTimeout = setTimeout(() => {
-      if (map.value && userMarker) updateRoute();
-    }, 200);
+  routingControl.value = L.Routing.control({
+    waypoints: waypoints.value,
+    routeWhileDragging: true,
+    showAlternatives: false,
+    fitSelectedRoutes: 'smart',
+    collapsible: true,
+    addWaypoints: false,
+    draggableWaypoints: true,
+    router: new L.Routing.osrmv1({
+      serviceUrl: 'https://router.project-osrm.org/route/v1',
+      profile: travelMode.value
+    }),
+    lineOptions: {
+      styles: [{ color: getRouteColor(), opacity: 0.8, weight: 6 }],
+      extendToWaypoints: true,
+      missingRouteTolerance: 0
+    },
+    createMarker: () => null // We manage markers separately
+  }).addTo(map.value);
+
+  routingControl.value.on("routesfound", (e) => {
+    const route = e.routes[0];
+    totalDistance.value = formatDistance(route.summary.totalDistance);
+    currentDuration.value = route.summary.totalTime;
+    routeInstructions.value = processInstructions(route.instructions);
+    
+    setTimeout(() => {
+      if (userMarker.value) userMarker.value.update();
+      if (destinationMarker.value) destinationMarker.value.update();
+      map.value.invalidateSize();
+    }, 100);
+  });
+
+  routingControl.value.on("routingerror", (e) => {
+    console.error("Routing error:", e);
+    alert("Could not find a route. Please try a different location.");
   });
 }
 
-function toggleRouteMode() {
-  routeMode.value = routeMode.value === 'fastest' ? 'direct' : 'fastest';
-  if (destinationMarker) updateRoute();
+function processInstructions(instructions) {
+  return instructions.map((i) => ({
+    instruction: i.text,
+    distance: formatDistance(i.distance),
+    time: formatDuration(i.time),
+    type: i.type
+  }));
 }
 
-function startTracking() {
-  if (navigator.geolocation) {
-    isTracking.value = true;
-    positionsHistory = [];
-    routeInstructions.value = [];
-    totalDistance.value = 0;
-    totalDuration.value = 0;
-    eta.value = 'Calculating...';
-    
-    map.value?.off('click');
-    map.value?.on('click', handleMapClick);
-    
-    watchId = navigator.geolocation.watchPosition(
-      updatePosition,
-      (error) => {
-        console.error("Geolocation error:", error.message);
-        alert("Location tracking failed.");
-        isLoading.value = false;
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0
-      }
-    );
-  } else {
-    alert("Geolocation is not supported by this browser.");
-    isLoading.value = false;
-  }
+function formatDistance(meters) {
+  return meters > 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
 }
 
-function stopTracking() {
-  if (watchId) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-  
-  isTracking.value = false;
-  map.value?.off('click');
-  
-  if (positionsHistory.length > 0) {
-    const distance = calculateTotalDistance();
-    alert(`Tracking finished!\nTotal distance: ${(distance / 1000).toFixed(2)} km`);
-  }
+function formatDuration(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.round((seconds % 3600) / 60);
+  return hours ? `${hours}h ${minutes}min` : `${minutes} min`;
 }
 
-function calculateTotalDistance() {
-  let total = 0;
-  for (let i = 1; i < positionsHistory.length; i++) {
-    total += map.value.distance(
-      positionsHistory[i-1],
-      positionsHistory[i]
-    );
-  }
-  return total;
+function getRouteColor() {
+  return travelMode.value === 'walking' ? '#34a853' : 
+         travelMode.value === 'cycling' ? '#fbbc05' : '#4285F4';
 }
 
-onMounted(() => {
-  // Initialize map with safety checks
-  const initMap = () => {
-    if (!mapContainer.value) {
-      requestAnimationFrame(initMap);
-      return;
-    }
-    
-    map.value = L.map(mapContainer.value, {
-      zoomControl: false,
-      preferCanvas: true // Better for frequent updates
-    }).setView([0, 0], 1);
-    
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map.value);
-    
-    // Add zoom control after map is ready
-    L.control.zoom({ position: 'topright' }).addTo(map.value);
-    
-    startTracking();
-  };
-  
-  initMap();
-});
+function setTravelMode(mode) {
+  travelMode.value = mode;
+  if (waypoints.value.length >= 2) updateRoute();
+}
+
+function clearRoute() {
+  if (routingControl.value) {
+    map.value.removeControl(routingControl.value);
+    routingControl.value = null;
+  }
+  if (destinationMarker.value) {
+    map.value.removeLayer(destinationMarker.value);
+    destinationMarker.value = null;
+  }
+  destination.value = null;
+  waypoints.value = [];
+  routeInstructions.value = [];
+  totalDistance.value = 0;
+  currentDuration.value = 0;
+}
 
 onUnmounted(() => {
-  stopTracking();
   if (map.value) {
-    try {
-      map.value.remove();
-    } catch (e) {
-      console.warn("Map removal error:", e);
-    }
+    map.value.remove();
+    map.value = null;
   }
 });
 </script>
 
 <template>
-  <div>
-    <div class="controls">
-      <p>Current Location: {{ lat.toFixed(6) }}, {{ lng.toFixed(6) }}</p>
-      <p v-if="currentSpeed > 0">Speed: {{ currentSpeed }} km/h</p>
-      <div v-if="isLoading" class="loading">Getting your location...</div>
-      
-      <div class="buttons">
-        <button @click="startTracking" v-if="!isTracking && !isLoading">Start Tracking</button>
-        <button @click="stopTracking" v-else-if="isTracking">Stop Tracking</button>
-        <button @click="toggleRouteMode" v-if="isTracking">
-          {{ routeMode === 'fastest' ? 'Show Direct Path' : 'Show Fastest Route' }}
+  <div class="map-app">
+    <div class="map-controls">
+      <button @click="locateUser" :disabled="isLoading">📍 Locate Me</button>
+      <div class="travel-modes">
+        <button @click="setTravelMode('driving')" :class="{ active: travelMode === 'driving' }" :disabled="isLoading">
+          🚗 Drive
+        </button>
+        <button @click="setTravelMode('walking')" :class="{ active: travelMode === 'walking' }" :disabled="isLoading">
+          🚶 Walk
+        </button>
+        <button @click="setTravelMode('cycling')" :class="{ active: travelMode === 'cycling' }" :disabled="isLoading">
+          🚲 Bike
         </button>
       </div>
-      
-      <div v-if="destinationMarker" class="route-info">
-        <h3>Route Information ({{ routeMode }})</h3>
-        <div class="route-summary">
-          <div class="route-stat">
-            <span class="stat-value">{{ totalDistance }} km</span>
-            <span class="stat-label">Distance</span>
-          </div>
-          <div class="route-stat">
-            <span class="stat-value">{{ totalDuration }} min</span>
-            <span class="stat-label">Duration</span>
-          </div>
-          <div class="route-stat">
-            <span class="stat-value">{{ eta }}</span>
-            <span class="stat-label">ETA</span>
-          </div>
-        </div>
-        
-        <div class="instructions" v-if="routeInstructions.length">
-          <h4>Directions:</h4>
-          <ol>
-            <li v-for="(step, index) in routeInstructions" :key="index" :class="step.type">
-              <span class="instruction-text">{{ step.instruction }}</span>
-              <span class="instruction-distance">{{ step.distance }} • {{ step.duration }}</span>
-            </li>
-          </ol>
-        </div>
+      <button @click="clearRoute" :disabled="!destination || isLoading">Clear Route</button>
+      <div v-if="totalDistance && !isLoading" class="route-summary">
+        <div>📏 {{ totalDistance }}</div>
+        <div>⏱ {{ formatDuration(currentDuration) }}</div>
       </div>
+      <div v-else-if="isLoading" class="loading-indicator">Loading route...</div>
     </div>
-    
-    <div ref="mapContainer" style="width: 100%; height: 500px;"></div>
+
+    <div ref="mapContainer" class="map-container"></div>
+
+    <div v-if="routeInstructions.length && !isLoading" class="directions">
+      <h3>Directions ({{ travelMode }})</h3>
+      <ol>
+        <li v-for="(step, i) in routeInstructions" :key="i" :class="'step-' + step.type">
+          <div class="step-instruction">{{ step.instruction }}</div>
+          <div class="step-details">
+            <span class="step-distance">{{ step.distance }}</span>
+            <span class="step-time">{{ step.time }}</span>
+          </div>
+        </li>
+      </ol>
+    </div>
   </div>
 </template>
 
 <style>
-.controls {
-  padding: 15px;
-  background: #f8f9fa;
-  border-bottom: 1px solid #dee2e6;
+/* Base styles */
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
   font-family: Arial, sans-serif;
 }
 
-.loading {
-  padding: 10px;
-  background: #f0f0f0;
-  margin: 10px 0;
-  text-align: center;
-  border-radius: 4px;
+.map-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
 }
 
-.buttons {
-  margin: 10px 0;
+.map-container {
+  flex: 1;
+  min-height: 400px;
+  width: 100%;
+  background: #f0f0f0;
+}
+
+.leaflet-container {
+  background: #d4d4d4;
+}
+
+/* Controls */
+.map-controls {
+  padding: 12px;
+  background: #f8f9fa;
   display: flex;
-  gap: 10px;
   flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
 }
 
 button {
   padding: 8px 16px;
-  background: #3b82f6;
-  color: white;
+  background: #e0e0e0;
   border: none;
   border-radius: 4px;
   cursor: pointer;
-  flex: 1;
-  min-width: 120px;
-  font-size: 14px;
+  font-weight: bold;
+  transition: background 0.2s;
 }
 
-button:hover {
-  background: #2563eb;
+button:hover:not(:disabled) {
+  background: #d0d0d0;
 }
 
-.route-info {
-  margin-top: 15px;
-  padding: 15px;
-  background: white;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+button.active {
+  background: #4285F4;
+  color: white;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.travel-modes {
+  display: flex;
+  gap: 8px;
 }
 
 .route-summary {
   display: flex;
-  justify-content: space-between;
-  margin-bottom: 15px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid #eee;
-  gap: 10px;
+  gap: 15px;
+  margin-left: auto;
+  font-weight: 500;
+  color: #333;
 }
 
-.route-stat {
-  text-align: center;
-  flex: 1;
-  min-width: 80px;
+.loading-indicator {
+  margin-left: auto;
+  color: #666;
+  font-style: italic;
 }
 
-.stat-value {
-  display: block;
-  font-size: 1.1rem;
-  font-weight: bold;
-  color: #1e40af;
-}
-
-.stat-label {
-  display: block;
-  font-size: 0.8rem;
-  color: #64748b;
-  margin-top: 4px;
-}
-
-.instructions {
-  max-height: 200px;
-  overflow-y: auto;
-  margin-top: 10px;
-  padding: 10px;
+/* Directions */
+.directions {
+  padding: 16px;
   background: #f8f9fa;
-  border-radius: 8px;
+  border-top: 1px solid #ddd;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
-.instructions ol {
+.directions h3 {
+  margin-top: 0;
+  color: #333;
+}
+
+.directions ol {
   padding-left: 20px;
   margin: 0;
 }
 
-.instructions li {
-  margin: 8px 0;
-  padding: 8px;
-  border-radius: 4px;
+.directions li {
+  margin: 10px 0;
+  padding: 10px;
   background: white;
-  font-size: 14px;
+  border-radius: 4px;
+  border-left: 4px solid #4285F4;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
-.instruction-text {
-  display: block;
+.step-instruction {
+  font-weight: 500;
   margin-bottom: 4px;
 }
 
-.instruction-distance {
-  font-size: 0.8rem;
-  color: #64748b;
+.step-details {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9em;
+  color: #666;
 }
 
-.depart, .arrive, .alert {
-  font-weight: bold;
-  color: #1e40af;
+/* Marker fixes */
+.leaflet-marker-icon, .leaflet-marker-shadow {
+  transform-origin: center bottom !important;
 }
 
-.direct {
-  font-style: italic;
-  color: #4b5563;
+.leaflet-zoom-animated {
+  will-change: transform;
+  transition: transform 0.25s cubic-bezier(0,0,0.25,1);
 }
 
-.turn {
-  padding-left: 20px;
-  position: relative;
-}
-
-.turn:before {
-  content: "↳";
-  position: absolute;
-  left: 5px;
-  color: #3b82f6;
-}
-
-h3, h4 {
-  margin: 5px 0;
-  color: #1e40af;
-  font-size: 1.1rem;
-}
-
-h4 {
-  font-size: 1rem;
-  margin-top: 10px;
-}
-
-/* Leaflet overrides */
-.leaflet-control-zoom {
-  margin-top: 60px !important;
-}
-
-.leaflet-popup-content {
-  font-size: 14px;
+/* Responsive */
+@media (max-width: 768px) {
+  .map-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  
+  .route-summary {
+    margin-left: 0;
+    gap: 10px;
+  }
+  
+  .map-container {
+    min-height: 300px;
+  }
+  
+  .directions {
+    max-height: 200px;
+  }
 }
 </style>
