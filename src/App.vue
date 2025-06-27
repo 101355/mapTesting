@@ -148,6 +148,48 @@ onMounted(() => {
   });
 });
 
+// function locateUser() {
+//   if (!navigator.geolocation) {
+//     alert("Geolocation is not supported by your browser");
+//     return;
+//   }
+
+//   navigator.geolocation.watchPosition(
+//     (pos) => {
+//       const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+//       currentLocation.value = latlng;
+
+//       if (!userMarker.value || !map.value.hasLayer(userMarker.value)) {
+//         if (userMarker.value) map.value.removeLayer(userMarker.value);
+//         userMarker.value = L.marker(latlng, { 
+//           icon: greenIcon,
+//           zIndexOffset: 1000
+//         }).addTo(map.value)
+//           .bindPopup("Your location")
+//           .openPopup();
+//         map.value.setView(latlng, 15);
+//       } else {
+//         userMarker.value.setLatLng(latlng);
+//       }
+
+//       if (destination.value) {
+//         waypoints.value = [latlng, destination.value];
+//         updateRoute();
+//       }
+      
+//       // Update position along route if tracking
+//       if (routeCoordinates.value.length) {
+//         updatePositionOnRoute();
+//       }
+//     },
+//     (err) => {
+//       console.error("Geolocation error:", err);
+//       alert("Error getting your location: " + err.message);
+//     },
+//     { enableHighAccuracy: true, timeout: 10000 }
+//   );
+// }
+
 function locateUser() {
   if (!navigator.geolocation) {
     alert("Geolocation is not supported by your browser");
@@ -159,36 +201,34 @@ function locateUser() {
       const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
       currentLocation.value = latlng;
 
+      // Marker logic
       if (!userMarker.value || !map.value.hasLayer(userMarker.value)) {
         if (userMarker.value) map.value.removeLayer(userMarker.value);
-        userMarker.value = L.marker(latlng, { 
-          icon: greenIcon,
-          zIndexOffset: 1000
-        }).addTo(map.value)
-          .bindPopup("Your location")
-          .openPopup();
+        userMarker.value = L.marker(latlng, { icon: greenIcon }).addTo(map.value);
         map.value.setView(latlng, 15);
       } else {
         userMarker.value.setLatLng(latlng);
       }
 
-      if (destination.value) {
+      // ✅ Only update if distance from previous location > 50m
+      const prevLatLng = waypoints.value[0];
+      const distanceMoved = prevLatLng ? map.value.distance(prevLatLng, latlng) : Infinity;
+
+      if (destination.value && distanceMoved > 50) {
         waypoints.value = [latlng, destination.value];
         updateRoute();
       }
-      
-      // Update position along route if tracking
+
+      // Track along route
       if (routeCoordinates.value.length) {
         updatePositionOnRoute();
       }
     },
-    (err) => {
-      console.error("Geolocation error:", err);
-      alert("Error getting your location: " + err.message);
-    },
+    (err) => alert("Location error: " + err.message),
     { enableHighAccuracy: true, timeout: 10000 }
   );
 }
+
 
 async function updateRoute() {
   if (!map.value || map.value._removed) return;
@@ -496,6 +536,9 @@ html, body, #app {
 
 /* Controls */
 .map-controls {
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  border-radius: 8px;
+  margin: 10px;
   padding: 12px;
   background: #f8f9fa;
   display: flex;
@@ -506,17 +549,19 @@ html, body, #app {
 }
 
 button {
-  padding: 8px 16px;
-  background: #e0e0e0;
-  border: none;
-  border-radius: 4px;
   cursor: pointer;
   font-weight: bold;
-  transition: background 0.2s;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 8px 16px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  transition: all 0.3s ease;
 }
 
 button:hover:not(:disabled) {
-  background: #d0d0d0;
+  background: #f0f0f0;
+  border-color: #bbb;
 }
 
 button.active {
@@ -639,15 +684,16 @@ button:disabled {
 
 .progress-bar {
   height: 8px;
-  background: #e0e0e0;
-  border-radius: 4px;
   overflow: hidden;
+  background: #eee;
+  border-radius: 10px;
 }
 
 .progress-fill {
   height: 100%;
-  background: #4285F4;
   transition: width 0.3s ease;
+  background: linear-gradient(90deg, #4285F4, #34a853);
+  border-radius: 10px 0 0 10px;
 }
 
 .progress-text {
