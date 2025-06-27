@@ -16,13 +16,16 @@ const lat = ref(0);
 const lng = ref(0);
 const map = ref();
 const mapContainer = ref();
+const isTracking = ref(false);
+const isLoading = ref(true); // Loading state while getting location
+
 let userMarker = null;
 let watchId = null;
 let movementPolyline = null;
 let positionsHistory = [];
 let destinationMarker = null;
 let directionLine = null;
-let isTracking = ref(false);
+let isFirstPosition = true;
 
 function updatePosition(position) {
   lat.value = position.coords.latitude;
@@ -32,8 +35,12 @@ function updatePosition(position) {
   // Add to movement history
   positionsHistory.push(currentPosition);
   
-  // Don't auto-center the map - let user control zoom/pan
-  // map.value.setView(currentPosition, 15);
+  // Center the map on first position only
+  if (isFirstPosition) {
+    map.value.setView(currentPosition, 15);
+    isFirstPosition = false;
+    isLoading.value = false;
+  }
 
   // Update or create user marker
   if (!userMarker) {
@@ -102,6 +109,10 @@ function handleMapClick(e) {
   // Remove previous destination marker
   if (destinationMarker) {
     map.value.removeLayer(destinationMarker);
+    if (directionLine) {
+      map.value.removeLayer(directionLine);
+      directionLine = null;
+    }
   }
   
   // Add new destination marker
@@ -140,15 +151,17 @@ function startTracking() {
       (error) => {
         console.error("Geolocation error:", error.message);
         alert("Location tracking failed.");
+        isLoading.value = false;
       },
       {
         enableHighAccuracy: true,
-        timeout: 5000,
+        timeout: 10000,
         maximumAge: 0
       }
     );
   } else {
     alert("Geolocation is not supported by this browser.");
+    isLoading.value = false;
   }
 }
 
@@ -180,11 +193,15 @@ function calculateTotalDistance() {
 }
 
 onMounted(() => {
-  map.value = L.map(mapContainer.value).setView([51.505, -0.09], 13);
+  // Initialize map with minimal view
+  map.value = L.map(mapContainer.value).setView([0, 0], 1);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
     attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map.value);
+
+  // Start tracking immediately
+  startTracking();
 });
 
 onUnmounted(() => {
@@ -195,8 +212,32 @@ onUnmounted(() => {
 <template>
   <div>
     <p>Latitude: {{ lat.toFixed(6) }}, Longitude: {{ lng.toFixed(6) }}</p>
-    <button @click="startTracking" v-if="!isTracking">Start Tracking</button>
-    <button @click="stopTracking" v-else>Stop Tracking</button>
+    <div v-if="isLoading" class="loading">Getting your location...</div>
+    <button @click="startTracking" v-if="!isTracking && !isLoading">Start Tracking</button>
+    <button @click="stopTracking" v-else-if="isTracking">Stop Tracking</button>
     <div ref="mapContainer" style="width: 100%; height: 500px;"></div>
   </div>
 </template>
+
+<style>
+.loading {
+  padding: 10px;
+  background: #f0f0f0;
+  margin-bottom: 10px;
+  text-align: center;
+}
+
+button {
+  padding: 8px 16px;
+  margin-right: 10px;
+  background: #42b983;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #369f6b;
+}
+</style>
