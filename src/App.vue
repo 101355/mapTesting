@@ -4,6 +4,15 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-routing-machine";
 import "leaflet-routing-machine/dist/leaflet-routing-machine.css";
+import axios from "axios";
+
+// Route tracking variables
+const currentPositionOnRoute = ref(0);
+const routePolyline = ref(null);
+const routeCoordinates = ref([]);
+const remainingDistance = ref(0);
+const remainingTime = ref(0);
+let trackingInterval = null;
 
 // Fix marker icons
 delete L.Icon.Default.prototype._getIconUrl;
@@ -25,6 +34,16 @@ const redIcon = new L.Icon({
 
 const greenIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41],
+  className: 'leaflet-marker-icon'
+});
+
+const blueIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
   iconSize: [25, 41],
   iconAnchor: [12, 41],
@@ -60,7 +79,7 @@ onMounted(() => {
       map.value = L.map(mapContainer.value, {
         zoomControl: true,
         preferCanvas: true,
-        renderer: L.canvas() // Use canvas renderer for better performance
+        renderer: L.canvas()
       }).setView([40.7128, -74.0060], 13);
 
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -102,7 +121,7 @@ onMounted(() => {
         isLoading.value = false;
       });
 
-      // Improved zoom handling with error boundaries
+      // Improved zoom handling
       map.value.on('zoomstart', () => {
         if (!map.value || map.value._removed) return;
       });
@@ -157,6 +176,11 @@ function locateUser() {
         waypoints.value = [latlng, destination.value];
         updateRoute();
       }
+      
+      // Update position along route if tracking
+      if (routeCoordinates.value.length) {
+        updatePositionOnRoute();
+      }
     },
     (err) => {
       console.error("Geolocation error:", err);
@@ -170,66 +194,130 @@ async function updateRoute() {
   if (!map.value || map.value._removed) return;
   if (waypoints.value.length < 2) return;
 
-  // Clear existing route if any
-  if (routingControl.value) {
-    try {
+  isLoading.value = true;
+  
+  try {
+    // Clear existing route if any
+    if (routingControl.value) {
       map.value.removeControl(routingControl.value);
-    } catch (e) {
-      console.warn("Error removing routing control:", e);
+      routingControl.value = null;
     }
-    routingControl.value = null;
-  }
-
-  routingControl.value = L.Routing.control({
-    waypoints: waypoints.value,
-    routeWhileDragging: true,
-    showAlternatives: false,
-    fitSelectedRoutes: 'smart',
-    collapsible: true,
-    addWaypoints: false,
-    draggableWaypoints: true,
-    router: new L.Routing.osrmv1({
-      serviceUrl: 'https://router.project-osrm.org/route/v1',
-      profile: travelMode.value
-    }),
-    lineOptions: {
-      styles: [{ color: getRouteColor(), opacity: 0.8, weight: 6 }],
-      extendToWaypoints: true,
-      missingRouteTolerance: 0
-    },
-    createMarker: () => null // We manage markers separately
-  }).addTo(map.value);
-
-  routingControl.value.on("routesfound", (e) => {
-    const route = e.routes[0];
-    totalDistance.value = formatDistance(route.summary.totalDistance);
-    currentDuration.value = route.summary.totalTime;
-    routeInstructions.value = processInstructions(route.instructions);
     
-    setTimeout(() => {
-      try {
-        if (userMarker.value && map.value.hasLayer(userMarker.value)) userMarker.value.update();
-        if (destinationMarker.value && map.value.hasLayer(destinationMarker.value)) destinationMarker.value.update();
-        map.value.invalidateSize();
-      } catch (e) {
-        console.warn("Route update error:", e);
-      }
-    }, 100);
-  });
+    if (routePolyline.value) {
+      map.value.removeLayer(routePolyline.value);
+    }
 
-  routingControl.value.on("routingerror", (e) => {
-    console.error("Routing error:", e);
+    // Use direct OSRM API call for more control
+    const response = await axios.get(
+      `https://router.project-osrm.org/route/v1/${travelMode.value}/` +
+      `${waypoints.value[0].lng},${waypoints.value[0].lat};` +
+      `${waypoints.value[1].lng},${waypoints.value[1].lat}?` +
+      'overview=full&geometries=geojson&steps=true'
+    );
+
+    const route = response.data.routes[0];
+    
+    // Store route coordinates for tracking
+    routeCoordinates.value = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
+    
+    // Create polyline for the route
+    routePolyline.value = L.polyline(routeCoordinates.value, {
+      color: getRouteColor(),
+      weight: 6,
+      opacity: 0.8
+    }).addTo(map.value);
+
+    // Update route summary
+    totalDistance.value = route.distance;
+    currentDuration.value = route.duration;
+    remainingDistance.value = route.distance;
+    remainingTime.value = route.duration;
+    
+    // Process instructions
+    routeInstructions.value = processInstructions(route.legs[0].steps);
+    
+    // Fit bounds to route
+    const bounds = L.latLngBounds(routeCoordinates.value);
+    map.value.fitBounds(bounds, { padding: [50, 50] });
+    
+    // Start tracking position along route
+    startRouteTracking();
+    
+  } catch (error) {
+    console.error("Routing error:", error);
     alert("Could not find a route. Please try a different location.");
-  });
+  } finally {
+    isLoading.value = false;
+  }
 }
 
-function processInstructions(instructions) {
-  return instructions.map((i) => ({
-    instruction: i.text,
-    distance: formatDistance(i.distance),
-    time: formatDuration(i.time),
-    type: i.type
-  }));
+function startRouteTracking() {
+  stopRouteTracking();
+  
+  // Only track if we have a route and user location
+  if (!routeCoordinates.value.length || !currentLocation.value) return;
+  
+  // Find closest point on route to current location
+  updatePositionOnRoute();
+  
+  // Update position periodically
+  trackingInterval = setInterval(updatePositionOnRoute, 5000);
+}
+
+function stopRouteTracking() {
+  if (trackingInterval) {
+    clearInterval(trackingInterval);
+    trackingInterval = null;
+  }
+}
+
+function updatePositionOnRoute() {
+  if (!routeCoordinates.value.length || !currentLocation.value) return;
+  
+  // Find the closest point on the route to current location
+  let closestIndex = 0;
+  let minDistance = Infinity;
+  
+  routeCoordinates.value.forEach((coord, index) => {
+    const distance = map.value.distance(
+      L.latLng(coord),
+      L.latLng(currentLocation.value.lat, currentLocation.value.lng)
+    );
+    
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+  
+  // Calculate progress (0-1)
+  currentPositionOnRoute.value = closestIndex / routeCoordinates.value.length;
+  
+  // Update remaining distance and time
+  updateRouteProgress();
+}
+
+function updateRouteProgress() {
+  if (!routeCoordinates.value.length) return;
+  
+  // Calculate remaining distance and time based on progress
+  remainingDistance.value = totalDistance.value * (1 - currentPositionOnRoute.value);
+  remainingTime.value = currentDuration.value * (1 - currentPositionOnRoute.value);
+}
+
+function processInstructions(steps) {
+  return steps.flatMap(step => {
+    // Skip very short steps
+    if (step.distance < 10) return [];
+    
+    return {
+      instruction: step.maneuver.instruction,
+      distance: formatDistance(step.distance),
+      time: formatDuration(step.duration),
+      type: step.maneuver.type,
+      modifier: step.maneuver.modifier
+    };
+  });
 }
 
 function formatDistance(meters) {
@@ -253,31 +341,38 @@ function setTravelMode(mode) {
 }
 
 function clearRoute() {
+  stopRouteTracking();
+  
   if (routingControl.value) {
-    try {
-      map.value.removeControl(routingControl.value);
-    } catch (e) {
-      console.warn("Error removing routing control:", e);
-    }
+    map.value.removeControl(routingControl.value);
     routingControl.value = null;
   }
+  
+  if (routePolyline.value) {
+    map.value.removeLayer(routePolyline.value);
+    routePolyline.value = null;
+  }
+  
   if (destinationMarker.value) {
-    try {
-      map.value.removeLayer(destinationMarker.value);
-    } catch (e) {
-      console.warn("Error removing destination marker:", e);
-    }
+    map.value.removeLayer(destinationMarker.value);
     destinationMarker.value = null;
   }
+  
   destination.value = null;
   waypoints.value = [];
   routeInstructions.value = [];
+  routeCoordinates.value = [];
   totalDistance.value = 0;
   currentDuration.value = 0;
+  remainingDistance.value = 0;
+  remainingTime.value = 0;
+  currentPositionOnRoute.value = 0;
   showDirections.value = false;
 }
 
 onUnmounted(() => {
+  stopRouteTracking();
+  
   if (map.value) {
     try {
       // Remove all layers
@@ -320,8 +415,13 @@ onUnmounted(() => {
         {{ showDirections ? 'Hide' : 'Show' }} Directions
       </button>
       <div v-if="totalDistance && !isLoading" class="route-summary">
-        <div>📏 {{ totalDistance }}</div>
+        <div>📏 {{ formatDistance(totalDistance) }}</div>
         <div>⏱ {{ formatDuration(currentDuration) }}</div>
+        <div v-if="currentPositionOnRoute > 0">
+          🚀 {{ Math.round(currentPositionOnRoute * 100) }}% · 
+          {{ formatDistance(remainingDistance) }} left · 
+          {{ formatDuration(remainingTime) }}
+        </div>
       </div>
       <div v-else-if="isLoading" class="loading-indicator">Loading route...</div>
     </div>
@@ -332,12 +432,33 @@ onUnmounted(() => {
       <h3>Directions ({{ travelMode }}) 
         <button @click="showDirections = false" class="close-btn">×</button>
       </h3>
+      <div class="progress-container">
+        <div class="progress-bar">
+          <div class="progress-fill" :style="{ width: `${currentPositionOnRoute * 100}%` }"></div>
+        </div>
+        <div class="progress-text">
+          {{ Math.round(currentPositionOnRoute * 100) }}% complete
+        </div>
+      </div>
       <ol>
-        <li v-for="(step, i) in routeInstructions" :key="i" :class="'step-' + step.type">
-          <div class="step-instruction">{{ step.instruction }}</div>
-          <div class="step-details">
-            <span class="step-distance">{{ step.distance }}</span>
-            <span class="step-time">{{ step.time }}</span>
+        <li v-for="(step, i) in routeInstructions" :key="i" :class="['step', `step-${step.type}`, { 'step-current': i === Math.floor(currentPositionOnRoute * routeInstructions.length) }]">
+          <div class="step-icon">
+            <span v-if="step.type === 'depart'">🚦</span>
+            <span v-else-if="step.type === 'arrive'">🏁</span>
+            <span v-else-if="step.modifier === 'left'">⬅️</span>
+            <span v-else-if="step.modifier === 'right'">➡️</span>
+            <span v-else-if="step.modifier === 'sharp left'">↖️</span>
+            <span v-else-if="step.modifier === 'sharp right'">↗️</span>
+            <span v-else-if="step.modifier === 'slight left'">↙️</span>
+            <span v-else-if="step.modifier === 'slight right'">↘️</span>
+            <span v-else>🛣️</span>
+          </div>
+          <div class="step-content">
+            <div class="step-instruction">{{ step.instruction }}</div>
+            <div class="step-details">
+              <span class="step-distance">{{ step.distance }}</span>
+              <span class="step-time">{{ step.time }}</span>
+            </div>
           </div>
         </li>
       </ol>
@@ -415,10 +536,19 @@ button:disabled {
 
 .route-summary {
   display: flex;
-  gap: 15px;
+  flex-direction: column;
+  gap: 4px;
   margin-left: auto;
   font-weight: 500;
   color: #333;
+  text-align: right;
+  font-size: 0.9em;
+}
+
+.route-summary > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .loading-indicator {
@@ -445,17 +575,35 @@ button:disabled {
 }
 
 .directions ol {
-  padding-left: 20px;
-  margin: 0;
+  padding-left: 0;
+  margin: 10px 0 0;
+  list-style: none;
 }
 
 .directions li {
-  margin: 10px 0;
-  padding: 10px;
+  margin: 8px 0;
+  padding: 8px;
   background: white;
   border-radius: 4px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  transition: all 0.2s;
+}
+
+.step-current {
   border-left: 4px solid #4285F4;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  background-color: #f0f7ff !important;
+}
+
+.step-icon {
+  font-size: 1.2em;
+  min-width: 30px;
+  text-align: center;
+}
+
+.step-content {
+  flex: 1;
 }
 
 .step-instruction {
@@ -466,7 +614,7 @@ button:disabled {
 .step-details {
   display: flex;
   justify-content: space-between;
-  font-size: 0.9em;
+  font-size: 0.85em;
   color: #666;
 }
 
@@ -482,6 +630,31 @@ button:disabled {
 .close-btn:hover {
   color: #333;
   background: none;
+}
+
+/* Progress bar */
+.progress-container {
+  margin: 10px 0 15px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #4285F4;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 0.8em;
+  color: #666;
+  text-align: center;
+  margin-top: 4px;
 }
 
 /* Marker fixes */
@@ -503,7 +676,9 @@ button:disabled {
   
   .route-summary {
     margin-left: 0;
-    gap: 10px;
+    gap: 4px;
+    text-align: left;
+    width: 100%;
   }
   
   .map-container {
