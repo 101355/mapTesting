@@ -230,66 +230,130 @@ function locateUser() {
 }
 
 
+// async function updateRoute() {
+//   if (!map.value || map.value._removed) return;
+//   if (waypoints.value.length < 2) return;
+
+//   isLoading.value = true;
+  
+//   try {
+//     // Clear existing route if any
+//     if (routingControl.value) {
+//       map.value.removeControl(routingControl.value);
+//       routingControl.value = null;
+//     }
+    
+//     if (routePolyline.value) {
+//       map.value.removeLayer(routePolyline.value);
+//     }
+
+//     // Use direct OSRM API call for more control
+//     const response = await axios.get(
+//       `https://router.project-osrm.org/route/v1/${travelMode.value}/` +
+//       `${waypoints.value[0].lng},${waypoints.value[0].lat};` +
+//       `${waypoints.value[1].lng},${waypoints.value[1].lat}?` +
+//       'overview=full&geometries=geojson&steps=true'
+//     );
+
+//     const route = response.data.routes[0];
+    
+//     // Store route coordinates for tracking
+//     routeCoordinates.value = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
+    
+//     // Create polyline for the route
+//     routePolyline.value = L.polyline(routeCoordinates.value, {
+//       color: getRouteColor(),
+//       weight: 6,
+//       opacity: 0.8
+//     }).addTo(map.value);
+
+//     // Update route summary
+//     totalDistance.value = route.distance;
+//     currentDuration.value = route.duration;
+//     remainingDistance.value = route.distance;
+//     remainingTime.value = route.duration;
+    
+//     // Process instructions
+//     routeInstructions.value = processInstructions(route.legs[0].steps);
+    
+//     // Fit bounds to route
+//     const bounds = L.latLngBounds(routeCoordinates.value);
+//     map.value.fitBounds(bounds, { padding: [50, 50] });
+    
+//     // Start tracking position along route
+//     startRouteTracking();
+    
+//   } catch (error) {
+//     console.error("Routing error:", error);
+//     alert("Could not find a route. Please try a different location.");
+//   } finally {
+//     isLoading.value = false;
+//   }
+// }
+
 async function updateRoute() {
-  if (!map.value || map.value._removed) return;
-  if (waypoints.value.length < 2) return;
+  if (!map.value || map.value._removed || waypoints.value.length < 2) return;
 
   isLoading.value = true;
-  
+
   try {
-    // Clear existing route if any
+    // Clean up old route
     if (routingControl.value) {
       map.value.removeControl(routingControl.value);
       routingControl.value = null;
     }
-    
     if (routePolyline.value) {
       map.value.removeLayer(routePolyline.value);
     }
 
-    // Use direct OSRM API call for more control
-    const response = await axios.get(
-      `https://router.project-osrm.org/route/v1/${travelMode.value}/` +
-      `${waypoints.value[0].lng},${waypoints.value[0].lat};` +
-      `${waypoints.value[1].lng},${waypoints.value[1].lat}?` +
-      'overview=full&geometries=geojson&steps=true'
-    );
+    // 🛣️ Correct OSRM URL with travel mode
+    const mode = travelMode.value; // 'driving', 'walking', or 'cycling'
+    const [start, end] = waypoints.value;
+
+    const url = `https://router.project-osrm.org/route/v1/${mode}/` +
+      `${start.lng},${start.lat};${end.lng},${end.lat}` +
+      `?overview=full&geometries=geojson&steps=true`;
+
+    const response = await axios.get(url);
+
+    if (!response.data.routes || !response.data.routes.length) {
+      throw new Error("No route found");
+    }
 
     const route = response.data.routes[0];
-    
-    // Store route coordinates for tracking
+
+    // Decode route
     routeCoordinates.value = route.geometry.coordinates.map(coord => [coord[1], coord[0]]);
-    
-    // Create polyline for the route
+
+    // Draw route
     routePolyline.value = L.polyline(routeCoordinates.value, {
       color: getRouteColor(),
       weight: 6,
       opacity: 0.8
     }).addTo(map.value);
 
-    // Update route summary
-    totalDistance.value = route.distance;
-    currentDuration.value = route.duration;
+    totalDistance.value = route.distance; // in meters
+    currentDuration.value = route.duration; // in seconds
     remainingDistance.value = route.distance;
     remainingTime.value = route.duration;
-    
-    // Process instructions
+
+    // Instructions
     routeInstructions.value = processInstructions(route.legs[0].steps);
-    
-    // Fit bounds to route
+
+    // Fit to bounds
     const bounds = L.latLngBounds(routeCoordinates.value);
     map.value.fitBounds(bounds, { padding: [50, 50] });
-    
-    // Start tracking position along route
+
     startRouteTracking();
-    
+
   } catch (error) {
     console.error("Routing error:", error);
-    alert("Could not find a route. Please try a different location.");
+    alert("Failed to calculate route. Please try again.");
   } finally {
     isLoading.value = false;
   }
 }
+
 
 function startRouteTracking() {
   stopRouteTracking();
