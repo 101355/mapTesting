@@ -110,6 +110,43 @@ onMounted(() => {
   });
 });
 
+// function locateUser() {
+//   if (!navigator.geolocation) {
+//     alert("Geolocation is not supported by your browser");
+//     return;
+//   }
+
+//   navigator.geolocation.watchPosition(
+//     (pos) => {
+//       const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+//       currentLocation.value = latlng;
+
+//       if (!userMarker.value) {
+//         userMarker.value = L.marker(latlng, { 
+//           icon: greenIcon,
+//           zIndexOffset: 1000
+//         }).addTo(map.value)
+//           .bindPopup("Your location")
+//           .openPopup();
+//         map.value.setView(latlng, 15);
+//       } else {
+//         userMarker.value.setLatLng(latlng);
+//       }
+
+//       if (destination.value) {
+//         waypoints.value = [latlng, destination.value];
+//         updateRoute();
+//       }
+//     },
+//     (err) => {
+//       console.error("Geolocation error:", err);
+//       alert("Error getting your location: " + err.message);
+//     },
+//     { enableHighAccuracy: true, timeout: 10000 }
+//   );
+// }
+
+// Modify your locateUser function to include marker checks
 function locateUser() {
   if (!navigator.geolocation) {
     alert("Geolocation is not supported by your browser");
@@ -121,7 +158,8 @@ function locateUser() {
       const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
       currentLocation.value = latlng;
 
-      if (!userMarker.value) {
+      if (!userMarker.value || !map.value.hasLayer(userMarker.value)) {
+        if (userMarker.value) map.value.removeLayer(userMarker.value);
         userMarker.value = L.marker(latlng, { 
           icon: greenIcon,
           zIndexOffset: 1000
