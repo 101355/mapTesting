@@ -23,6 +23,7 @@ const totalDistance = ref(0);
 const totalDuration = ref(0);
 const currentSpeed = ref(0);
 const eta = ref('Calculating...');
+const routeMode = ref('fastest'); // 'fastest' or 'direct'
 
 let userMarker = null;
 let watchId = null;
@@ -35,31 +36,36 @@ let lastPosition = null;
 let lastPositionTime = null;
 
 function updatePosition(position) {
+  if (!map.value) return;
+  
   lat.value = position.coords.latitude;
   lng.value = position.coords.longitude;
   const currentPosition = [lat.value, lng.value];
   
-  // Calculate current speed if we have previous position
+  // Calculate current speed
   if (lastPosition && lastPositionTime) {
     const distance = map.value.distance(lastPosition, currentPosition);
-    const timeDiff = (Date.now() - lastPositionTime) / 1000; // seconds
+    const timeDiff = (Date.now() - lastPositionTime) / 1000;
     if (timeDiff > 0) {
-      currentSpeed.value = distance / timeDiff; // meters per second
-      currentSpeed.value = (currentSpeed.value * 3.6).toFixed(1); // convert to km/h
+      currentSpeed.value = (distance / timeDiff * 3.6).toFixed(1); // km/h
     }
   }
   
   lastPosition = currentPosition;
   lastPositionTime = Date.now();
-  
   positionsHistory.push(currentPosition);
   
   if (isFirstPosition) {
-    map.value.setView(currentPosition, 15);
-    isFirstPosition = false;
-    isLoading.value = false;
+    try {
+      map.value.setView(currentPosition, 15, { animate: false });
+      isFirstPosition = false;
+      isLoading.value = false;
+    } catch (e) {
+      console.warn("Map setView error:", e);
+    }
   }
 
+  // Update user marker
   if (!userMarker) {
     userMarker = L.marker(currentPosition, {
       draggable: false,
@@ -74,34 +80,87 @@ function updatePosition(position) {
     userMarker.setLatLng(currentPosition);
   }
 
+  // Update route if destination exists
   if (destinationMarker) {
     updateRoute();
   }
 
+  // Update movement path
   if (movementPolyline) {
-    map.value.removeLayer(movementPolyline);
+    try {
+      map.value.removeLayer(movementPolyline);
+    } catch (e) {
+      console.warn("Polyline removal error:", e);
+    }
   }
   movementPolyline = L.polyline(positionsHistory, {color: 'blue'}).addTo(map.value);
 }
 
 async function updateRoute() {
-  if (!userMarker || !destinationMarker) return;
+  if (!map.value || !userMarker || !destinationMarker) return;
   
   const start = userMarker.getLatLng();
   const end = destinationMarker.getLatLng();
   
+  // Clear previous route
+  if (routeLine) {
+    try {
+      map.value.removeLayer(routeLine);
+    } catch (e) {
+      console.warn("Route removal error:", e);
+    }
+  }
+  
+  if (routeMode.value === 'direct') {
+    // Show direct beeline
+    routeLine = L.polyline([start, end], {
+      color: '#93c5fd',
+      weight: 3,
+      dashArray: '5, 5'
+    }).addTo(map.value);
+    
+    const distance = map.value.distance(start, end);
+    totalDistance.value = (distance / 1000).toFixed(2);
+    totalDuration.value = 'N/A';
+    eta.value = 'N/A';
+    
+    routeInstructions.value = [{
+      instruction: "Direct path to destination",
+      distance: totalDistance.value + ' km',
+      duration: 'N/A',
+      type: 'direct'
+    }];
+    
+    return;
+  }
+  
   try {
+    // Show temporary beeline while loading
+    const tempLine = L.polyline([start, end], {
+      color: '#93c5fd',
+      weight: 3,
+      dashArray: '5, 5'
+    }).addTo(map.value);
+    
+    // Get route from OSRM
     const response = await fetch(
       `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson&steps=true`
     );
     const data = await response.json();
     
-    if (data.routes && data.routes.length > 0) {
+    // Remove temporary line
+    try {
+      map.value.removeLayer(tempLine);
+    } catch (e) {
+      console.warn("Temp line removal error:", e);
+    }
+    
+    if (data.routes?.[0]) {
       const route = data.routes[0];
-      totalDistance.value = (route.distance / 1000).toFixed(2); // km
-      totalDuration.value = (route.duration / 60).toFixed(2); // minutes
+      totalDistance.value = (route.distance / 1000).toFixed(2);
+      totalDuration.value = (route.duration / 60).toFixed(2);
       
-      // Calculate ETA based on current speed if available
+      // Calculate ETA
       if (currentSpeed.value > 0) {
         const speedKmh = parseFloat(currentSpeed.value);
         const distanceKm = parseFloat(totalDistance.value);
@@ -113,20 +172,16 @@ async function updateRoute() {
         eta.value = `${totalDuration.value} min (estimate)`;
       }
       
-      // Update route instructions
-      routeInstructions.value = route.legs[0].steps.map(step => ({
-        instruction: step.maneuver.instruction.replace(/<\/?[^>]+(>|$)/g, ""), // Remove HTML tags
+      // Process instructions
+      routeInstructions.value = (route.legs[0]?.steps || []).map(step => ({
+        instruction: cleanInstruction(step.maneuver?.instruction),
         distance: (step.distance / 1000).toFixed(2) + ' km',
         duration: (step.duration / 60).toFixed(2) + ' min',
-        type: step.maneuver.type
+        type: step.maneuver?.type || 'turn'
       }));
       
-      // Draw the route
-      if (routeLine) {
-        map.value.removeLayer(routeLine);
-      }
-      
-      routeLine = L.geoJSON(data.routes[0].geometry, {
+      // Draw route
+      routeLine = L.geoJSON(route.geometry, {
         style: {
           color: '#3b82f6',
           weight: 5,
@@ -134,70 +189,72 @@ async function updateRoute() {
         }
       }).addTo(map.value);
       
-      // Fit map to route bounds with padding
-      const bounds = L.latLngBounds([start, end]);
-      map.value.fitBounds(bounds, { padding: [50, 50] });
-      
-      // Add distance markers every 1km
-      addDistanceMarkers(data.routes[0].geometry);
+      // Fit bounds safely
+      try {
+        const bounds = L.latLngBounds([start, end]);
+        map.value.fitBounds(bounds, { 
+          padding: [50, 50],
+          animate: false 
+        });
+      } catch (e) {
+        console.warn("FitBounds error:", e);
+        map.value.setView(start, 15, { animate: false });
+      }
     }
   } catch (error) {
     console.error("Routing error:", error);
+    // Fallback to direct line
+    routeLine = L.polyline([start, end], {
+      color: '#93c5fd',
+      weight: 3,
+      dashArray: '5, 5'
+    }).addTo(map.value);
+    
+    routeInstructions.value = [{
+      instruction: "Could not load detailed directions - showing direct path",
+      distance: map.value.distance(start, end).toFixed(0) + ' m',
+      duration: 'N/A',
+      type: 'alert'
+    }];
   }
 }
 
-function addDistanceMarkers(geometry) {
-  // Remove existing distance markers
-  map.value.eachLayer(layer => {
-    if (layer.options && layer.options.isDistanceMarker) {
-      map.value.removeLayer(layer);
-    }
-  });
-  
-  // Calculate cumulative distance and add markers every 1km
-  let cumulativeDistance = 0;
-  const coordinates = geometry.coordinates;
-  
-  for (let i = 1; i < coordinates.length; i++) {
-    const prev = coordinates[i-1];
-    const curr = coordinates[i];
-    const segmentDistance = map.value.distance(
-      [prev[1], prev[0]],
-      [curr[1], curr[0]]
-    );
-    
-    cumulativeDistance += segmentDistance;
-    
-    if (cumulativeDistance >= 1000) { // Every 1km
-      const marker = L.marker([curr[1], curr[0]], {
-        icon: L.divIcon({
-          html: `${(cumulativeDistance / 1000).toFixed(1)}km`,
-          className: 'distance-marker',
-          iconSize: [60, 20]
-        }),
-        isDistanceMarker: true
-      }).addTo(map.value);
-      
-      cumulativeDistance = 0; // Reset for next marker
-    }
+function cleanInstruction(text) {
+  if (!text) return "Continue";
+  try {
+    return text.replace(/<\/?[^>]+(>|$)/g, "");
+  } catch {
+    return text;
   }
 }
 
 function handleMapClick(e) {
-  if (!isTracking.value) return;
+  if (!isTracking.value || !map.value) return;
   
+  // Clear previous destination
   if (destinationMarker) {
-    map.value.removeLayer(destinationMarker);
-    if (routeLine) {
-      map.value.removeLayer(routeLine);
-      routeLine = null;
+    try {
+      map.value.removeLayer(destinationMarker);
+    } catch (e) {
+      console.warn("Marker removal error:", e);
     }
-    routeInstructions.value = [];
-    totalDistance.value = 0;
-    totalDuration.value = 0;
-    eta.value = 'Calculating...';
   }
   
+  if (routeLine) {
+    try {
+      map.value.removeLayer(routeLine);
+    } catch (e) {
+      console.warn("Route removal error:", e);
+    }
+    routeLine = null;
+  }
+  
+  routeInstructions.value = [];
+  totalDistance.value = 0;
+  totalDuration.value = 0;
+  eta.value = 'Calculating...';
+  
+  // Create new destination
   destinationMarker = L.marker(e.latlng, {
     draggable: true,
     icon: L.icon({
@@ -208,13 +265,22 @@ function handleMapClick(e) {
     .bindPopup("Destination")
     .openPopup();
   
-  if (userMarker) {
-    updateRoute();
-  }
+  // Update route immediately
+  updateRoute();
   
+  // Update on drag with debounce
+  let dragTimeout;
   destinationMarker.on('drag', () => {
-    updateRoute();
+    clearTimeout(dragTimeout);
+    dragTimeout = setTimeout(() => {
+      if (map.value && userMarker) updateRoute();
+    }, 200);
   });
+}
+
+function toggleRouteMode() {
+  routeMode.value = routeMode.value === 'fastest' ? 'direct' : 'fastest';
+  if (destinationMarker) updateRoute();
 }
 
 function startTracking() {
@@ -226,8 +292,8 @@ function startTracking() {
     totalDuration.value = 0;
     eta.value = 'Calculating...';
     
-    map.value.off('click');
-    map.value.on('click', handleMapClick);
+    map.value?.off('click');
+    map.value?.on('click', handleMapClick);
     
     watchId = navigator.geolocation.watchPosition(
       updatePosition,
@@ -255,11 +321,11 @@ function stopTracking() {
   }
   
   isTracking.value = false;
-  map.value.off('click');
+  map.value?.off('click');
   
   if (positionsHistory.length > 0) {
     const distance = calculateTotalDistance();
-    alert(`Tracking finished!\nTotal distance traveled: ${(distance / 1000).toFixed(2)} km`);
+    alert(`Tracking finished!\nTotal distance: ${(distance / 1000).toFixed(2)} km`);
   }
 }
 
@@ -275,17 +341,41 @@ function calculateTotalDistance() {
 }
 
 onMounted(() => {
-  map.value = L.map(mapContainer.value).setView([0, 0], 1);
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  }).addTo(map.value);
-
-  startTracking();
+  // Initialize map with safety checks
+  const initMap = () => {
+    if (!mapContainer.value) {
+      requestAnimationFrame(initMap);
+      return;
+    }
+    
+    map.value = L.map(mapContainer.value, {
+      zoomControl: false,
+      preferCanvas: true // Better for frequent updates
+    }).setView([0, 0], 1);
+    
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map.value);
+    
+    // Add zoom control after map is ready
+    L.control.zoom({ position: 'topright' }).addTo(map.value);
+    
+    startTracking();
+  };
+  
+  initMap();
 });
 
 onUnmounted(() => {
   stopTracking();
+  if (map.value) {
+    try {
+      map.value.remove();
+    } catch (e) {
+      console.warn("Map removal error:", e);
+    }
+  }
 });
 </script>
 
@@ -293,15 +383,19 @@ onUnmounted(() => {
   <div>
     <div class="controls">
       <p>Current Location: {{ lat.toFixed(6) }}, {{ lng.toFixed(6) }}</p>
-      <p v-if="currentSpeed > 0">Current Speed: {{ currentSpeed }} km/h</p>
+      <p v-if="currentSpeed > 0">Speed: {{ currentSpeed }} km/h</p>
       <div v-if="isLoading" class="loading">Getting your location...</div>
+      
       <div class="buttons">
         <button @click="startTracking" v-if="!isTracking && !isLoading">Start Tracking</button>
         <button @click="stopTracking" v-else-if="isTracking">Stop Tracking</button>
+        <button @click="toggleRouteMode" v-if="isTracking">
+          {{ routeMode === 'fastest' ? 'Show Direct Path' : 'Show Fastest Route' }}
+        </button>
       </div>
       
       <div v-if="destinationMarker" class="route-info">
-        <h3>Route Information</h3>
+        <h3>Route Information ({{ routeMode }})</h3>
         <div class="route-summary">
           <div class="route-stat">
             <span class="stat-value">{{ totalDistance }} km</span>
@@ -317,8 +411,8 @@ onUnmounted(() => {
           </div>
         </div>
         
-        <div class="instructions">
-          <h4>Turn-by-Turn Directions:</h4>
+        <div class="instructions" v-if="routeInstructions.length">
+          <h4>Directions:</h4>
           <ol>
             <li v-for="(step, index) in routeInstructions" :key="index" :class="step.type">
               <span class="instruction-text">{{ step.instruction }}</span>
@@ -338,6 +432,7 @@ onUnmounted(() => {
   padding: 15px;
   background: #f8f9fa;
   border-bottom: 1px solid #dee2e6;
+  font-family: Arial, sans-serif;
 }
 
 .loading {
@@ -345,12 +440,14 @@ onUnmounted(() => {
   background: #f0f0f0;
   margin: 10px 0;
   text-align: center;
+  border-radius: 4px;
 }
 
 .buttons {
   margin: 10px 0;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 button {
@@ -361,6 +458,8 @@ button {
   border-radius: 4px;
   cursor: pointer;
   flex: 1;
+  min-width: 120px;
+  font-size: 14px;
 }
 
 button:hover {
@@ -381,16 +480,18 @@ button:hover {
   margin-bottom: 15px;
   padding-bottom: 15px;
   border-bottom: 1px solid #eee;
+  gap: 10px;
 }
 
 .route-stat {
   text-align: center;
   flex: 1;
+  min-width: 80px;
 }
 
 .stat-value {
   display: block;
-  font-size: 1.2rem;
+  font-size: 1.1rem;
   font-weight: bold;
   color: #1e40af;
 }
@@ -399,10 +500,11 @@ button:hover {
   display: block;
   font-size: 0.8rem;
   color: #64748b;
+  margin-top: 4px;
 }
 
 .instructions {
-  max-height: 300px;
+  max-height: 200px;
   overflow-y: auto;
   margin-top: 10px;
   padding: 10px;
@@ -420,6 +522,7 @@ button:hover {
   padding: 8px;
   border-radius: 4px;
   background: white;
+  font-size: 14px;
 }
 
 .instruction-text {
@@ -432,9 +535,14 @@ button:hover {
   color: #64748b;
 }
 
-.depart, .arrive {
+.depart, .arrive, .alert {
   font-weight: bold;
   color: #1e40af;
+}
+
+.direct {
+  font-style: italic;
+  color: #4b5563;
 }
 
 .turn {
@@ -446,20 +554,26 @@ button:hover {
   content: "↳";
   position: absolute;
   left: 5px;
-}
-
-.distance-marker {
-  background: white;
-  padding: 2px 5px;
-  border-radius: 3px;
-  border: 1px solid #ccc;
-  font-size: 0.8rem;
-  font-weight: bold;
-  text-align: center;
+  color: #3b82f6;
 }
 
 h3, h4 {
   margin: 5px 0;
   color: #1e40af;
+  font-size: 1.1rem;
+}
+
+h4 {
+  font-size: 1rem;
+  margin-top: 10px;
+}
+
+/* Leaflet overrides */
+.leaflet-control-zoom {
+  margin-top: 60px !important;
+}
+
+.leaflet-popup-content {
+  font-size: 14px;
 }
 </style>
