@@ -207,7 +207,7 @@ async function updateRoute() {
     const distanceInKm = route.distance / 1000;
 
     let minutesPerKm = 1.88; // default for driving
-    if (travelMode.value === 'walking') minutesPerKm = 8.6;
+    if (travelMode.value === 'walking') minutesPerKm = 8.5;
     else if (travelMode.value === 'cycling') minutesPerKm = 4;
     else if (travelMode.value === 'driving') minutesPerKm = 1.88;
 
