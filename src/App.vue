@@ -46,6 +46,7 @@ const currentLocation = ref(null);
 const isLoading = ref(false);
 const waypoints = ref([]);
 const destination = ref(null);
+const showDirections = ref(false);
 
 onMounted(() => {
   nextTick(() => {
@@ -54,99 +55,80 @@ onMounted(() => {
       return;
     }
 
-    // Initialize map with default view (New York coordinates)
-    map.value = L.map(mapContainer.value, {
-      zoomControl: true,
-      preferCanvas: true
-    }).setView([40.7128, -74.0060], 13);
+    try {
+      // Initialize map with default view (New York coordinates)
+      map.value = L.map(mapContainer.value, {
+        zoomControl: true,
+        preferCanvas: true,
+        renderer: L.canvas() // Use canvas renderer for better performance
+      }).setView([40.7128, -74.0060], 13);
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(map.value);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(map.value);
 
-    // Handle map clicks to add destination
-    map.value.on('click', async (e) => {
-      if (!currentLocation.value) {
-        alert("Please wait for your location to load first");
-        return;
-      }
-      
-      destination.value = e.latlng;
-      
-      if (destinationMarker.value) {
-        map.value.removeLayer(destinationMarker.value);
-      }
-      
-      destinationMarker.value = L.marker(e.latlng, {
-        icon: redIcon,
-        zIndexOffset: 900
-      }).addTo(map.value)
-        .bindPopup("Destination")
-        .openPopup();
-      
-      waypoints.value = [
-        L.latLng(currentLocation.value.lat, currentLocation.value.lng),
-        e.latlng
-      ];
-      
-      isLoading.value = true;
-      try {
-        await updateRoute();
-      } catch (error) {
-        console.error("Routing error:", error);
-        alert("Failed to calculate route");
-      }
-      isLoading.value = false;
-    });
+      // Handle map clicks to add destination
+      map.value.on('click', async (e) => {
+        if (!currentLocation.value) {
+          alert("Please wait for your location to load first");
+          return;
+        }
+        
+        destination.value = e.latlng;
+        
+        if (destinationMarker.value) {
+          map.value.removeLayer(destinationMarker.value);
+        }
+        
+        destinationMarker.value = L.marker(e.latlng, {
+          icon: redIcon,
+          zIndexOffset: 900
+        }).addTo(map.value)
+          .bindPopup("Destination")
+          .openPopup();
+        
+        waypoints.value = [
+          L.latLng(currentLocation.value.lat, currentLocation.value.lng),
+          e.latlng
+        ];
+        
+        isLoading.value = true;
+        try {
+          await updateRoute();
+        } catch (error) {
+          console.error("Routing error:", error);
+          alert("Failed to calculate route");
+        }
+        isLoading.value = false;
+      });
 
-    // Ensure markers stay correct after zoom
-    map.value.on('zoomend', () => {
-      if (userMarker.value) userMarker.value.update();
-      if (destinationMarker.value) destinationMarker.value.update();
-      map.value.invalidateSize();
-    });
+      // Improved zoom handling with error boundaries
+      map.value.on('zoomstart', () => {
+        if (!map.value || map.value._removed) return;
+      });
 
-    locateUser();
+      map.value.on('zoomend', () => {
+        try {
+          if (userMarker.value && map.value.hasLayer(userMarker.value)) {
+            userMarker.value.update();
+          }
+          if (destinationMarker.value && map.value.hasLayer(destinationMarker.value)) {
+            destinationMarker.value.update();
+          }
+          map.value.invalidateSize();
+        } catch (e) {
+          console.warn("Zoom animation error:", e);
+        }
+      });
+
+      locateUser();
+    } catch (error) {
+      console.error("Map initialization error:", error);
+      alert("Failed to initialize map. Please try refreshing the page.");
+    }
   });
 });
 
-// function locateUser() {
-//   if (!navigator.geolocation) {
-//     alert("Geolocation is not supported by your browser");
-//     return;
-//   }
-
-//   navigator.geolocation.watchPosition(
-//     (pos) => {
-//       const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
-//       currentLocation.value = latlng;
-
-//       if (!userMarker.value) {
-//         userMarker.value = L.marker(latlng, { 
-//           icon: greenIcon,
-//           zIndexOffset: 1000
-//         }).addTo(map.value)
-//           .bindPopup("Your location")
-//           .openPopup();
-//         map.value.setView(latlng, 15);
-//       } else {
-//         userMarker.value.setLatLng(latlng);
-//       }
-
-//       if (destination.value) {
-//         waypoints.value = [latlng, destination.value];
-//         updateRoute();
-//       }
-//     },
-//     (err) => {
-//       console.error("Geolocation error:", err);
-//       alert("Error getting your location: " + err.message);
-//     },
-//     { enableHighAccuracy: true, timeout: 10000 }
-//   );
-// }
-
-// Modify your locateUser function to include marker checks
 function locateUser() {
   if (!navigator.geolocation) {
     alert("Geolocation is not supported by your browser");
@@ -185,10 +167,16 @@ function locateUser() {
 }
 
 async function updateRoute() {
+  if (!map.value || map.value._removed) return;
   if (waypoints.value.length < 2) return;
 
+  // Clear existing route if any
   if (routingControl.value) {
-    map.value.removeControl(routingControl.value);
+    try {
+      map.value.removeControl(routingControl.value);
+    } catch (e) {
+      console.warn("Error removing routing control:", e);
+    }
     routingControl.value = null;
   }
 
@@ -219,9 +207,13 @@ async function updateRoute() {
     routeInstructions.value = processInstructions(route.instructions);
     
     setTimeout(() => {
-      if (userMarker.value) userMarker.value.update();
-      if (destinationMarker.value) destinationMarker.value.update();
-      map.value.invalidateSize();
+      try {
+        if (userMarker.value && map.value.hasLayer(userMarker.value)) userMarker.value.update();
+        if (destinationMarker.value && map.value.hasLayer(destinationMarker.value)) destinationMarker.value.update();
+        map.value.invalidateSize();
+      } catch (e) {
+        console.warn("Route update error:", e);
+      }
     }, 100);
   });
 
@@ -262,11 +254,19 @@ function setTravelMode(mode) {
 
 function clearRoute() {
   if (routingControl.value) {
-    map.value.removeControl(routingControl.value);
+    try {
+      map.value.removeControl(routingControl.value);
+    } catch (e) {
+      console.warn("Error removing routing control:", e);
+    }
     routingControl.value = null;
   }
   if (destinationMarker.value) {
-    map.value.removeLayer(destinationMarker.value);
+    try {
+      map.value.removeLayer(destinationMarker.value);
+    } catch (e) {
+      console.warn("Error removing destination marker:", e);
+    }
     destinationMarker.value = null;
   }
   destination.value = null;
@@ -274,12 +274,28 @@ function clearRoute() {
   routeInstructions.value = [];
   totalDistance.value = 0;
   currentDuration.value = 0;
+  showDirections.value = false;
 }
 
 onUnmounted(() => {
   if (map.value) {
-    map.value.remove();
-    map.value = null;
+    try {
+      // Remove all layers
+      map.value.eachLayer(layer => {
+        try {
+          map.value.removeLayer(layer);
+        } catch (e) {
+          console.warn("Error removing layer:", e);
+        }
+      });
+      
+      // Remove the map instance
+      map.value.remove();
+    } catch (e) {
+      console.error("Error during map cleanup:", e);
+    } finally {
+      map.value = null;
+    }
   }
 });
 </script>
@@ -300,6 +316,9 @@ onUnmounted(() => {
         </button>
       </div>
       <button @click="clearRoute" :disabled="!destination || isLoading">Clear Route</button>
+      <button @click="showDirections = !showDirections" :disabled="!routeInstructions.length || isLoading">
+        {{ showDirections ? 'Hide' : 'Show' }} Directions
+      </button>
       <div v-if="totalDistance && !isLoading" class="route-summary">
         <div>📏 {{ totalDistance }}</div>
         <div>⏱ {{ formatDuration(currentDuration) }}</div>
@@ -309,8 +328,10 @@ onUnmounted(() => {
 
     <div ref="mapContainer" class="map-container"></div>
 
-    <div v-if="routeInstructions.length && !isLoading" class="directions">
-      <h3>Directions ({{ travelMode }})</h3>
+    <div v-if="showDirections && routeInstructions.length && !isLoading" class="directions">
+      <h3>Directions ({{ travelMode }}) 
+        <button @click="showDirections = false" class="close-btn">×</button>
+      </h3>
       <ol>
         <li v-for="(step, i) in routeInstructions" :key="i" :class="'step-' + step.type">
           <div class="step-instruction">{{ step.instruction }}</div>
@@ -418,6 +439,9 @@ button:disabled {
 .directions h3 {
   margin-top: 0;
   color: #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .directions ol {
@@ -444,6 +468,20 @@ button:disabled {
   justify-content: space-between;
   font-size: 0.9em;
   color: #666;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 1.2em;
+  padding: 0 8px;
+  margin-left: 10px;
+  color: #666;
+}
+
+.close-btn:hover {
+  color: #333;
+  background: none;
 }
 
 /* Marker fixes */
